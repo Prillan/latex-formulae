@@ -37,6 +37,7 @@ import Image.LaTeX.Render
 import Codec.Picture
 import Control.Applicative
 import Data.IORef
+import Data.List (intercalate)
 import System.FilePath
 
 import qualified Data.ByteString.Base64.Lazy as B64
@@ -231,7 +232,7 @@ data PandocLatexOptions = PandocLatexOptions
         , latexErrorDisplay   :: RenderError -> Block
           -- ^ How to display various errors (such as LaTeX errors). Usually this can just be @displayError@ but you may wish @hideError@
           --   to avoid putting potentially secure information into the output page.
-        , latexEnvironmentMap :: Block -> Maybe (LatexOptions, Latex)
+        , latexEnvironmentMap :: Block -> Maybe (LatexOptions, [String], Latex)
           -- ^ LaTeX environment settings, including the preamble, for each equation type (display and inline)
         }
 
@@ -241,9 +242,9 @@ defaultPandocLatexOptions = PandocLatexOptions
    , latexErrorDisplay = Plain . pure . displayError
    , latexEnvironmentMap =
      \case CodeBlock (_, classes, _) s
-             | "latex" `elem` classes -> Just (defaultLatexOptions, s)
-             | "latex-tikz" `elem` classes -> Just (tikzLatexOptions, s)
-             | "latex-tikzcd" `elem` classes -> Just (tikzcdLatexOptions, s)
+             | "latex" `elem` classes -> Just (defaultLatexOptions, classes, s)
+             | "latex-tikz" `elem` classes -> Just (tikzLatexOptions, classes, s)
+             | "latex-tikzcd" `elem` classes -> Just (tikzcdLatexOptions, classes, s)
            _ -> Nothing
    }
 
@@ -271,7 +272,7 @@ convertLatexDataURIWith
   -> IO Block
 convertLatexDataURIWith f o node =
   case latexEnvironmentMap o node of
-    Just (opts, s) -> f opts s >>= \case
+    Just (opts, cs, s) -> f opts s >>= \case
       Left e -> return $ latexErrorDisplay o e
       Right i -> let Right bs = encodeDynamicPng i
                      dataUri = "data:image/png;base64," ++ BS.unpack (B64.encode bs)
@@ -282,7 +283,7 @@ convertLatexDataURIWith f o node =
                     " alt=\"" ++ processAltString s ++ "\"" ++
                     " height=" ++ show h ++
                     " src=\""  ++ dataUri ++ "\"" ++
-                    " class=latex" ++
+                    " class=\"" ++ intercalate " " cs ++  "\"" ++
                     " />"
     Nothing -> return node
    where processAltString = (>>= \case
