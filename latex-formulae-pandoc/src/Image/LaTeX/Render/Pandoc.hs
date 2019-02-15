@@ -13,6 +13,12 @@ module Image.LaTeX.Render.Pandoc
        , PandocFormulaOptions(..)
        , ShrinkSize
        , defaultPandocFormulaOptions
+       , PandocLatexOptions(..)
+       , defaultPandocLatexOptions
+       , convertLatexDataURI
+       , convertAllLatexDataURI
+       , convertLatexDataURIWith
+       , convertAllLatexDataURIWith
          -- ** Error display functions
        , hideError
        , displayError
@@ -215,3 +221,84 @@ displayError (IOException e)        = pandocError [Str "IO Exception:", LineBrea
 
 pandocError :: [Inline] -> Inline
 pandocError = Strong . (Emph [Str "Error:"] :)
+
+
+
+-- | All options pertaining to the actual display of formulae. 
+data PandocLatexOptions = PandocLatexOptions
+        { latexShrinkBy       :: ShrinkSize
+          -- ^ Denominator for all dimensions. Useful for displaying high DPI images in small sizes, for retina displays. Otherwise set to 1.
+        , latexErrorDisplay   :: RenderError -> Block
+          -- ^ How to display various errors (such as LaTeX errors). Usually this can just be @displayError@ but you may wish @hideError@
+          --   to avoid putting potentially secure information into the output page.
+        , latexEnvironmentMap :: Block -> Maybe (LatexOptions, Latex)
+          -- ^ LaTeX environment settings, including the preamble, for each equation type (display and inline)
+        }
+
+defaultPandocLatexOptions :: PandocLatexOptions
+defaultPandocLatexOptions = PandocLatexOptions
+   { latexShrinkBy = 2
+   , latexErrorDisplay = Plain . pure . displayError
+   , latexEnvironmentMap =
+     \case CodeBlock (_, classes, _) s
+             | "latex" `elem` classes -> Just (defaultLatexOptions, s)
+             | "latex-tikz" `elem` classes -> Just (tikzLatexOptions, s)
+             | "latex-tikzcd" `elem` classes -> Just (tikzcdLatexOptions, s)
+           _ -> Nothing
+   }
+
+-- | Convert a formula in a pandoc document to an image, embedding the image into the HTML using Data URIs.
+convertLatexDataURI
+  :: EnvironmentOptions           -- ^ System environment settings
+  -> PandocLatexOptions         -- ^ Formula display settings
+  -> Block -> IO Block
+convertLatexDataURI = convertLatexDataURIWith . imageForLatex
+
+-- | Convert all formulae in a pandoc document to images, embedding the images into the HTML using Data URIs.
+convertAllLatexDataURI
+  :: EnvironmentOptions           -- ^ System environment settings
+  -> PandocLatexOptions         -- ^ Formula display settings
+  -> Pandoc -> IO Pandoc
+convertAllLatexDataURI e = walkM . convertLatexDataURI e
+
+-- | A generalisation of 'convertFormulaDataURI' which allows the actual image rendering
+--   function to be customised, so that (e.g) caching can be added or other image processing.
+convertLatexDataURIWith
+  :: (LatexOptions -> Latex -> IO (Either RenderError DynamicImage))
+     -- ^ Function that renders a formula, such as @imageForLatex defaultEnv@
+  -> PandocLatexOptions -- ^ Latex display settings
+  -> Block
+  -> IO Block
+convertLatexDataURIWith f o node =
+  case latexEnvironmentMap o node of
+    Just (opts, s) -> f opts s >>= \case
+      Left e -> return $ latexErrorDisplay o e
+      Right i -> let Right bs = encodeDynamicPng i
+                     dataUri = "data:image/png;base64," ++ BS.unpack (B64.encode bs)
+                     (ow,oh) = dimensions i
+                     (w,h) = (ow `div` latexShrinkBy o, oh `div` latexShrinkBy o)
+                 in return $ RawBlock (Format "html") $
+                    "<img width="  ++ show w ++
+                    " alt=\"" ++ processAltString s ++ "\"" ++
+                    " height=" ++ show h ++
+                    " src=\""  ++ dataUri ++ "\"" ++
+                    " class=latex" ++
+                    " />"
+    Nothing -> return node
+   where processAltString = (>>= \case
+                 '<'  -> "&lt;"
+                 '>'  -> "&gt;"
+                 '&'  -> "&amp;"
+                 '"'  -> "&quot;"
+                 '\'' -> "&39;"
+                 '\n' -> " "
+                 '\r' -> " "
+                 '\t' -> " "
+                 x    -> [x])
+
+convertAllLatexDataURIWith
+  :: (LatexOptions -> Latex -> IO (Either RenderError DynamicImage))
+     -- ^ Function that renders a formula, such as @imageForFormula defaultEnv@
+  -> PandocLatexOptions -- ^ Formula display settings
+  -> Pandoc -> IO Pandoc
+convertAllLatexDataURIWith f = walkM . convertLatexDataURIWith f

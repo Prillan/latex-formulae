@@ -61,6 +61,16 @@ compileFormulaeDataURI eo po =
           imageForFormula eo x y
     in unsafeCompiler . convertAllFormulaeDataURIWith eachFormula po
 
+compileLatexDataURI :: EnvironmentOptions
+                    -> PandocLatexOptions
+                    -> Pandoc -> Compiler Pandoc
+compileLatexDataURI eo po =
+    let eachFormula x y = do
+          putStrLn $ "    latex \"" ++ equationPreview y ++ "\""
+          putStrLn   "      drawing..."
+          imageForLatex eo x y
+    in unsafeCompiler . convertAllLatexDataURIWith eachFormula po
+
 equationPreview :: String -> String
 equationPreview (dropWhile isSpace -> x)
       | length x <= 16 = x

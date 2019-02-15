@@ -2,7 +2,8 @@
 module Image.LaTeX.Render
        ( -- * Rendering Formulas
          imageForFormula
-       , Formula, Baseline
+       , imageForLatex
+       , Formula, Baseline, Latex
          -- * Errors
        , RenderError (..)
          -- * Options
@@ -14,6 +15,10 @@ module Image.LaTeX.Render
        , FormulaOptions (..)
        , displaymath
        , math
+       , LatexOptions (..)
+       , defaultLatexOptions
+       , tikzLatexOptions
+       , tikzcdLatexOptions
        )
        where
 
@@ -71,6 +76,30 @@ data FormulaOptions
                       }
        deriving (Eq, Show, Read, Ord)
 
+data LatexOptions
+     = LatexOptions { latexPreamble :: String -- ^ LaTeX preamble to use. Put your @\usepackage@ commands here.@ commands here.
+                    , latexStandaloneOptions :: String
+                    , latexDpi :: Int -- ^ DPI for the image to be rendered at. ~200 is good for retina displays, ~100 works OK for non-retina displays.
+                    }
+       deriving (Eq, Show, Read, Ord)
+
+defaultLatexOptions :: LatexOptions
+defaultLatexOptions =
+  LatexOptions { latexPreamble = intercalate "\n" [ "\\pagestyle{empty}"
+                                                  , "\\usepackage{amsmath}" ]
+               , latexStandaloneOptions = "border=.5bp"
+               , latexDpi = 200 }
+
+tikzLatexOptions :: LatexOptions
+tikzLatexOptions =
+  defaultLatexOptions { latexStandaloneOptions = "tikz" }
+
+tikzcdLatexOptions :: LatexOptions
+tikzcdLatexOptions =
+  defaultLatexOptions { latexStandaloneOptions = "tikz"
+                      , latexPreamble = intercalate "\n" [ latexPreamble defaultLatexOptions
+                                                         , "\\usepackage{tikz-cd}" ] }
+
 -- | Use the @amsmath@ package, the @displaymath@ environment, and 200dpi.
 displaymath :: FormulaOptions
 displaymath = FormulaOptions "\\usepackage{amsmath}" "displaymath" 200
@@ -87,10 +116,10 @@ defaultEnv = EnvironmentOptions "latex" "dvips" "convert" [] [] [] (UseSystemTem
 --   specify the environment in the 'FormulaOptions' instead.
 type Formula = String
 
+type Latex = String
+
 -- | Number of pixels from the bottom of the image to the typesetting baseline. Useful for setting your formulae inline with text.
 type Baseline = Int
-
-
 
 -- | Convert a formula into a JuicyPixels 'DynamicImage', also detecting where the typesetting baseline of the image is.
 imageForFormula :: EnvironmentOptions -> FormulaOptions -> Formula -> IO (Either RenderError (Baseline, DynamicImage))
@@ -170,3 +199,44 @@ postprocess' img bg
     pixelAt' x y | x < imageWidth img && y < imageHeight img = pixelAt img x y
                  | otherwise = bg
 
+-- | Convert a formula into a JuicyPixels 'DynamicImage', also detecting where the typesetting baseline of the image is.
+imageForLatex :: EnvironmentOptions -> LatexOptions -> Latex -> IO (Either RenderError DynamicImage)
+imageForLatex (EnvironmentOptions {..}) (LatexOptions {..}) code =
+    bracket getCurrentDirectory setCurrentDirectory $ const $ withTemp $ \temp -> runExceptT $ do
+      let standaloneOpts =
+            if null latexStandaloneOptions
+              then ""
+              else "[" ++ latexStandaloneOptions ++ "]"
+          doc = mconcat [ "\\nonstopmode\n"
+                        , "\\documentclass", standaloneOpts, "{standalone}\n"
+                        , latexPreamble, "\n"
+                        , "\\begin{document}\n"
+                        , code, "\n"
+                        , "\\end{document}\n" ]
+--      io $ putStrLn doc
+      io $ writeFile (temp </> tempFileBaseName <.> "tex") doc
+      io $ setCurrentDirectory temp
+      (c,o,e) <- io $ flip (readProcessWithExitCode "pdflatex") "" $ latexArgs ++ [tempFileBaseName <.> "tex"]
+      io $ removeFile (tempFileBaseName <.> "tex")
+      io $ removeFile (tempFileBaseName <.> "aux")
+      when (c /= ExitSuccess) $ do
+        io $ removeFile (tempFileBaseName <.> "dvi")
+        throwE $ LaTeXFailure (o ++ "\n" ++ e)
+      (c'', o'', e'') <- io $ flip (readProcessWithExitCode imageMagickCommand) "" $
+                                [ "-density", show latexDpi
+                                , "-bordercolor", "none"
+                                , "-border", "1x1"
+                                , "-background", "none"
+                                , "-splice","1x0"
+                                ] ++ imageMagickArgs ++
+                                [ tempFileBaseName <.> "pdf", tempFileBaseName <.> "png" ]
+      when (c'' /= ExitSuccess) $ throwE $ IMConvertFailure (o'' ++ "\n" ++ e'')
+      imgM <- io $ readImage (tempFileBaseName <.> "png")
+      img <- withExceptT ImageReadError $ hoistEither imgM
+      io $ removeFile $ tempFileBaseName <.> "png"
+      hoistEither $ pure img
+  where
+    io = withExceptT IOException . tryIO
+    withTemp a = case tempDir of
+      UseSystemTempDir f -> withSystemTempDirectory f a
+      UseCurrentDir f -> withTempDirectory "." f a
