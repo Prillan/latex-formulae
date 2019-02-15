@@ -10,6 +10,7 @@ module Hakyll.Contrib.LaTeX
        ( initFormulaCompilerDataURI
        , CacheSize
        , compileFormulaeDataURI
+       , compileLatexDataURI
        ) where
 
 import Image.LaTeX.Render
